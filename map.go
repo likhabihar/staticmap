@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"image/color"
 	"io"
+	"math"
 	"strings"
 
 	staticMap "github.com/Luzifer/go-staticmaps"
 	"github.com/fogleman/gg"
 	"github.com/golang/geo/s2"
 	"github.com/pkg/errors"
+	"golang.org/x/image/font/basicfont"
 )
 
 //nolint:mnd // these are the "constant" definitions
@@ -41,17 +43,24 @@ type marker struct {
 	pos   s2.LatLng
 	color color.Color
 	size  markerSize
+	label string
 }
 
 func (m marker) String() string {
 	r, g, b, a := m.color.RGBA()
-	return fmt.Sprintf("%s|%.0f|%d,%d,%d,%d", m.pos.String(), m.size, r, g, b, a)
+	return fmt.Sprintf("%s|%.0f|%d,%d,%d,%d|%s", m.pos.String(), m.size, r, g, b, a, m.label)
+}
+
+type mapPath struct {
+	positions []s2.LatLng
+	color     color.Color
 }
 
 type generateMapConfig struct {
 	Center             s2.LatLng
 	Zoom               int
 	Markers            []marker
+	Paths              []mapPath
 	Width              int
 	Height             int
 	DisableAttribution bool
@@ -63,17 +72,27 @@ func (g generateMapConfig) getCacheKey() string {
 	for _, m := range g.Markers {
 		markerString = append(markerString, m.String())
 	}
+	pathString := []string{}
+	for _, path := range g.Paths {
+		parts := []string{}
+		for _, position := range path.positions {
+			parts = append(parts, position.String())
+		}
+		r, green, b, a := path.color.RGBA()
+		pathString = append(pathString, fmt.Sprintf("%d,%d,%d,%d:%s", r, green, b, a, strings.Join(parts, ",")))
+	}
 
 	overlayString := []string{}
 	for _, o := range g.Overlays {
 		overlayString = append(overlayString, o.URLPattern)
 	}
 
-	hashString := fmt.Sprintf("%s:::%s|%d|%s|%dx%d|%v|%s",
+	hashString := fmt.Sprintf("%s:::%s|%d|%s|%s|%dx%d|%v|%s",
 		version,
 		g.Center.String(),
 		g.Zoom,
 		strings.Join(markerString, "+"),
+		strings.Join(pathString, "+"),
 		g.Width,
 		g.Height,
 		g.DisableAttribution,
@@ -113,6 +132,47 @@ func generateMap(opts generateMapConfig) (io.Reader, error) {
 	}
 
 	pngCtx := gg.NewContextForImage(img)
+	for _, path := range opts.Paths {
+		if len(path.positions) < 2 {
+			continue
+		}
+		pngCtx.SetColor(path.color)
+		pngCtx.SetLineWidth(3)
+		for i := 1; i < len(path.positions); i++ {
+			x1, y1 := coordinateToPixel(path.positions[i-1], opts)
+			x2, y2 := coordinateToPixel(path.positions[i], opts)
+			pngCtx.DrawLine(x1, y1, x2, y2)
+			pngCtx.Stroke()
+		}
+	}
+	pngCtx.SetFontFace(basicfont.Face7x13)
+	for _, marker := range opts.Markers {
+		if marker.label == "" {
+			continue
+		}
+		x, y := coordinateToPixel(marker.pos, opts)
+		pngCtx.SetColor(color.Black)
+		pngCtx.DrawString(marker.label, x+8, y-8)
+	}
 	pngBuf := new(bytes.Buffer)
 	return pngBuf, errors.Wrap(pngCtx.EncodePNG(pngBuf), "encoding to PNG")
+}
+
+func coordinateToPixel(position s2.LatLng, opts generateMapConfig) (float64, float64) {
+	const tileSize = 256.0
+	worldSize := tileSize * math.Pow(2, float64(opts.Zoom))
+	project := func(ll s2.LatLng) (float64, float64) {
+		lat := math.Max(-85.05112878, math.Min(85.05112878, ll.Lat.Degrees()))
+		return (ll.Lng.Degrees() + 180) / 360 * worldSize,
+			(1 - math.Log(math.Tan(lat*math.Pi/180)+1/math.Cos(lat*math.Pi/180))/math.Pi) / 2 * worldSize
+	}
+	x, y := project(position)
+	cx, cy := project(opts.Center)
+	dx := x - cx
+	if dx > worldSize/2 {
+		dx -= worldSize
+	} else if dx < -worldSize/2 {
+		dx += worldSize
+	}
+	return float64(opts.Width)/2 + dx, float64(opts.Height)/2 + y - cy
 }

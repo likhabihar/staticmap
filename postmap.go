@@ -14,6 +14,7 @@ type postMapEnvelope struct {
 	Center             postMapPoint   `json:"center"`
 	Zoom               int            `json:"zoom"`
 	Markers            postMapMarkers `json:"markers"`
+	Paths              postMapPaths   `json:"paths"`
 	Width              int            `json:"width"`
 	Height             int            `json:"height"`
 	DisableAttribution bool           `json:"disable_attribution"`
@@ -37,6 +38,9 @@ func (p postMapEnvelope) toGenerateMapConfig() (generateMapConfig, error) {
 	if result.Markers, err = p.Markers.toMarkers(); err != nil {
 		return generateMapConfig{}, err
 	}
+	if result.Paths, err = p.Paths.toPaths(); err != nil {
+		return generateMapConfig{}, err
+	}
 
 	if result.Overlays, err = p.Overlays.toOverlays(); err != nil {
 		return generateMapConfig{}, err
@@ -48,6 +52,7 @@ func (p postMapEnvelope) toGenerateMapConfig() (generateMapConfig, error) {
 type postMapMarker struct {
 	Size  string       `json:"size"`
 	Color string       `json:"color"`
+	Label string       `json:"label"`
 	Coord postMapPoint `json:"coord"`
 }
 
@@ -74,7 +79,42 @@ func (p postMapMarkers) toMarkers() ([]marker, error) {
 		raw = append(raw, pm.String())
 	}
 
-	return parseMarkerLocations(raw)
+	markers, err := parseMarkerLocations(raw)
+	if err != nil {
+		return nil, err
+	}
+	for i := range markers {
+		markers[i].label = p[i].Label
+	}
+	return markers, nil
+}
+
+type postMapPath struct {
+	Color     string         `json:"color"`
+	Positions []postMapPoint `json:"positions"`
+}
+
+type postMapPaths []postMapPath
+
+func (p postMapPaths) toPaths() ([]mapPath, error) {
+	paths := make([]mapPath, 0, len(p))
+	for _, path := range p {
+		if len(path.Positions) < 2 {
+			continue
+		}
+
+		col, ok := markerColors[path.Color]
+		if !ok {
+			return nil, errors.Errorf("bad path color name %q", path.Color)
+		}
+
+		positions := make([]s2.LatLng, len(path.Positions))
+		for i, position := range path.Positions {
+			positions[i] = position.getPoint()
+		}
+		paths = append(paths, mapPath{color: col, positions: positions})
+	}
+	return paths, nil
 }
 
 type postMapPoint struct {
